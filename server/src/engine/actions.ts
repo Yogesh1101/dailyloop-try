@@ -1,4 +1,6 @@
+import { ZodError } from 'zod';
 import {
+  modelProblem,
   OperationSchema,
   type CreateRunInput,
   type Operation,
@@ -29,20 +31,31 @@ export class RunActions {
     const pipeline = await PipelineModel.findById(input.pipelineId).lean();
     if (!pipeline) throw new HttpError(404, 'Pipeline not found');
 
+    const catalog = (await getSettings()).models;
     const stages: RunStage[] = [];
     for (const ps of pipeline.stages as { operationKey: string; overrides?: Record<string, string> }[]) {
       const doc = await OperationModel.findOne({ key: ps.operationKey }).lean();
       if (!doc) throw new HttpError(400, `Pipeline references unknown operation "${ps.operationKey}"`);
       const o = ps.overrides ?? {};
-      const op: Operation = OperationSchema.parse({
-        ...doc,
-        provider: o.provider || doc.provider,
-        model: o.model || doc.model,
-        effort: o.effort || doc.effort,
-        instructions: o.extraInstructions?.trim()
-          ? `${doc.instructions}\n\n## Pipeline-specific instructions\n${o.extraInstructions.trim()}`
-          : doc.instructions,
-      });
+      let op: Operation;
+      try {
+        op = OperationSchema.parse({
+          ...doc,
+          provider: o.provider?.trim() || doc.provider,
+          model: o.model?.trim() || doc.model,
+          effort: o.effort || doc.effort,
+          instructions: o.extraInstructions?.trim()
+            ? `${doc.instructions}\n\n## Pipeline-specific instructions\n${o.extraInstructions.trim()}`
+            : doc.instructions,
+        });
+      } catch (e) {
+        if (e instanceof ZodError) {
+          throw new HttpError(400, `Operation "${doc.name}" is not valid: ${e.issues.map((i) => `${i.path.join('.') || 'operation'}: ${i.message}`).join('; ')}. Fix it under Operations (or the pipeline stage overrides).`);
+        }
+        throw e;
+      }
+      const problem = modelProblem(op.provider, op.model, catalog);
+      if (problem) throw new HttpError(400, `Stage "${op.name}": ${problem} Set it on the operation or in the pipeline's stage overrides.`);
       const skills = await SkillModel.find({ slug: { $in: op.skills } }).lean();
       const missing = op.skills.filter((s) => !skills.some((k) => k.slug === s));
       if (missing.length) throw new HttpError(400, `Operation "${op.key}" references unknown skill(s): ${missing.join(', ')}`);
@@ -187,11 +200,34 @@ export class RunActions {
     return run;
   }
 
-  async retry(id: string, feedback?: string) {
+  async retry(id: string, feedback?: string, change?: { provider?: string; model?: string; scope: 'stage' | 'remaining' }) {
     const run = await this.loadIdle(id);
     if (!['blocked', 'error', 'cancelled'].includes(run.status)) throw new HttpError(409, `Cannot retry a run that is ${run.status}`);
     const stage = run.stages[run.currentStage];
     if (!stage) throw new HttpError(409, 'No stage to retry');
+    if (change?.model) {
+      // A deliberate, logged human decision: the frozen snapshot is edited only here.
+      const provider = change.provider || stage.snapshot.provider;
+      try {
+        this.runner.providers.get(provider);
+      } catch {
+        throw new HttpError(400, `Unknown provider "${provider}"`);
+      }
+      const problem = modelProblem(provider, change.model, (await getSettings()).models);
+      if (problem) throw new HttpError(400, problem);
+      const last = change.scope === 'stage' ? run.currentStage : run.stages.length - 1;
+      for (let j = run.currentStage; j <= last; j++) {
+        if (run.stages[j].status === 'passed') continue;
+        run.stages[j].snapshot = { ...run.stages[j].snapshot, provider, model: change.model };
+      }
+      await this.bus.emit(
+        id,
+        run.currentStage,
+        'approval',
+        `Model switched by a human to ${provider}/${change.model} for ${change.scope === 'stage' ? 'this stage' : 'this and later stages'}`,
+        { level: 'warn' },
+      );
+    }
     const parts: string[] = [];
     if (stage.violation) {
       parts.push(`## Your previous attempt was halted\nPolicy violation [${stage.violation.rule}]: ${stage.violation.detail}\nDo not repeat it; find a compliant way or record the blocker in your artifact.`);

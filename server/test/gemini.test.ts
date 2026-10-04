@@ -115,6 +115,31 @@ describe('GeminiProvider (OpenAI-compatible endpoint)', () => {
     expect((await p.complete(req()).catch((e) => e)).kind).toBe('fatal');
   });
 
+  it('unwraps Gemini array-shaped errors into a readable message', async () => {
+    // Gemini wraps errors in an array, exactly as its endpoint does for a request without a model.
+    replies.push({ status: 400, body: [{ error: { code: 400, message: 'model is not specified', status: 'INVALID_ARGUMENT' } }] });
+    const err = await new GeminiProvider().complete(req()).catch((e) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.kind).toBe('fatal');
+    expect(err.message).toBe('Google Gemini rejected the request (400): model is not specified');
+
+    replies.push({ status: 400, body: [{ error: { code: 400, message: 'Please pass a valid API key', status: 'INVALID_ARGUMENT' } }] });
+    expect((await new GeminiProvider().complete(req()).catch((e) => e)).message).toContain('authentication failed');
+
+    replies.push({ status: 429, body: [{ error: { code: 429, message: 'Resource exhausted', details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '17s' }] } }] });
+    const limited = await new GeminiProvider().complete(req()).catch((e) => e);
+    expect(limited.kind).toBe('rate_limit');
+    expect(limited.retryAfterMs).toBe(17_000);
+  });
+
+  it('refuses to send a request without a model', async () => {
+    const before = requests.length;
+    const err = await new GeminiProvider().complete(req({ model: '  ' })).catch((e) => e);
+    expect(err).toBeInstanceOf(ProviderError);
+    expect(err.message).toContain('no model is configured');
+    expect(requests.length).toBe(before);
+  });
+
   it('lists models without the "models/" prefix', async () => {
     replies.push({ status: 200, body: { object: 'list', data: [{ id: 'models/gemini-2.5-flash', object: 'model', created: 0, owned_by: 'google' }, { id: 'models/gemini-2.5-flash-lite', object: 'model', created: 0, owned_by: 'google' }] } });
     expect(await new GeminiProvider().listModels()).toEqual(['gemini-2.5-flash', 'gemini-2.5-flash-lite']);

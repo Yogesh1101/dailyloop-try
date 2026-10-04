@@ -205,8 +205,8 @@ export const OperationSchema = z.object({
   /** Strict operating instructions for this operation (markdown). */
   instructions: z.string().min(1),
   skills: z.array(slug).default([]),
-  provider: z.string().default('anthropic'),
-  model: z.string().default('claude-opus-5-5'),
+  provider: z.string().trim().min(1, 'Choose a provider').default('anthropic'),
+  model: z.string().trim().min(1, 'Choose a model for this operation').default('claude-opus-5-5'),
   effort: EffortSchema.default('high'),
   policy: PolicySchema,
   /**
@@ -227,9 +227,12 @@ export const OperationSchema = z.object({
 });
 export type Operation = z.infer<typeof OperationSchema>;
 
+/** Blank override fields mean "no override". */
+const optionalId = z.preprocess((v) => (typeof v === 'string' && !v.trim() ? undefined : v), z.string().trim().optional());
+
 export const StageOverridesSchema = z.object({
-  provider: z.string().optional(),
-  model: z.string().optional(),
+  provider: optionalId,
+  model: optionalId,
   effort: EffortSchema.optional(),
   /** Appended to the operation instructions for this pipeline only. */
   extraInstructions: z.string().optional(),
@@ -504,10 +507,33 @@ export const ApproveSchema = z.object({
   resume: z.enum(['now', 'tonight']).default('now'),
 });
 export const FeedbackSchema = z.object({ feedback: z.string().min(1, 'Feedback is required') });
+export const RetrySchema = z
+  .object({
+    feedback: z.string().optional(),
+    /** Switch the provider/model before retrying (e.g. after a quota or a wrong model). */
+    provider: optionalId,
+    model: optionalId,
+    scope: z.enum(['stage', 'remaining']).default('remaining'),
+  })
+  .refine((r) => !r.provider || !!r.model, { message: 'Choose a model for the new provider', path: ['model'] });
+
 export const RewindSchema = z.object({
   stageIndex: z.number().int().min(0),
   feedback: z.string().min(1, 'Feedback is required'),
 });
+
+/**
+ * A model id that the catalog lists only under a different provider is almost certainly a
+ * mistake (e.g. a Claude id with the Gemini provider). Returns a human-readable problem, or null.
+ */
+export function modelProblem(provider: string, model: string | undefined, catalog: ModelInfo[]): string | null {
+  if (!model?.trim()) return `No model is set for provider "${provider}".`;
+  const owners = catalog.filter((m) => m.id === model.trim()).map((m) => m.provider);
+  if (owners.length && !owners.includes(provider)) {
+    return `Model "${model}" belongs to provider "${owners[0]}", but the stage uses provider "${provider}". Pick a ${provider} model (or, if your ${provider} endpoint really serves this id, add it to the model catalog under ${provider}).`;
+  }
+  return null;
+}
 
 /** Common shape for documents returned by the API. */
 export type WithMeta<T> = T & { _id: string; createdAt: string; updatedAt: string };

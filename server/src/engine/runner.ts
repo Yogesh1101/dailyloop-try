@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { GateResult, Run, RunStage, StageArtifact, Usage } from '@harness/shared';
+import { modelProblem, type GateResult, type Run, type RunStage, type StageArtifact, type Usage } from '@harness/shared';
 import { RepoModel, RunModel, UsageRecordModel } from '../db/models';
 import { captureRunKnowledge, retrieveKnowledge } from '../knowledge/retrieve';
 import type { ProviderRegistry } from '../providers/registry';
@@ -71,7 +71,7 @@ export function priorArtifacts(run: RunRecord, index: number): Map<string, { art
 
 export class PipelineRunner {
   constructor(
-    private providers: ProviderRegistry,
+    readonly providers: ProviderRegistry,
     private bus: EventBus,
   ) {}
 
@@ -214,6 +214,11 @@ export class PipelineRunner {
     }
     if (!provider.isConfigured()) {
       await this.block(run, index, 'blocked', `Provider "${provider.label}" is not configured. ${provider.configHint}`);
+      return 'paused';
+    }
+    const problem = modelProblem(op.provider, op.model, settings.models);
+    if (problem) {
+      await this.block(run, index, 'blocked', `${problem} Use "Retry" with another model, or fix the operation and start a new run.`);
       return 'paused';
     }
     const stageTokens = () => stage.usage.inputTokens + stage.usage.outputTokens + stage.usage.cacheReadTokens + stage.usage.cacheWriteTokens;

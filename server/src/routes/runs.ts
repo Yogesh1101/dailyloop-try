@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Router, type Response } from 'express';
-import { ApproveSchema, CreateRunSchema, FeedbackSchema, RewindSchema, type RunStage } from '@harness/shared';
+import { ApproveSchema, CreateRunSchema, FeedbackSchema, RetrySchema, RewindSchema, type RunStage } from '@harness/shared';
 import { RepoModel, RunEventModel, RunModel } from '../db/models';
 import { artifactRepoPath } from '../engine/gates';
 import { effectivePolicy } from '../engine/policy';
@@ -181,8 +181,8 @@ export function runRoutes(ctx: AppContext): Router {
     res.json(await ctx.actions.reject(oid(param(req.params.id)), FeedbackSchema.parse(req.body).feedback));
   });
   r.post('/runs/:id/retry', async (req, res) => {
-    const feedback = typeof req.body?.feedback === 'string' ? req.body.feedback : undefined;
-    res.json(await ctx.actions.retry(oid(param(req.params.id)), feedback));
+    const { feedback, provider, model, scope } = RetrySchema.parse(req.body ?? {});
+    res.json(await ctx.actions.retry(oid(param(req.params.id)), feedback, model ? { provider, model, scope } : undefined));
   });
   r.post('/runs/:id/rewind', async (req, res) => {
     const { stageIndex, feedback } = RewindSchema.parse(req.body);

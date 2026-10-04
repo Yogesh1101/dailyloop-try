@@ -88,7 +88,7 @@ describe.skipIf(!URI)('end-to-end pipeline runs', () => {
         await PipelineModel.create({
           key,
           name: key,
-          stages: stages.map(([operationKey, provider]) => ({ operationKey, overrides: { provider, model: 'mock-agent' } })),
+          stages: stages.map(([operationKey, provider]) => ({ operationKey, overrides: { provider, model: provider === 'mock' ? 'mock-agent' : `${provider}-model` } })),
           globalPolicy: (await PipelineModel.findOne({ key: 'standard-delivery' }).lean())!.globalPolicy,
           maxRunCostUsd,
         })
@@ -156,6 +156,26 @@ describe.skipIf(!URI)('end-to-end pipeline runs', () => {
       return r.status === 'awaiting_approval' && r.stages[0].attempts === 2;
     });
     expect(recording.briefs.at(-1)).toContain('Consider a write-through cache');
+  });
+
+  it('refuses to start a run whose stage pairs a provider with another provider\'s model', async () => {
+    const pipelineId = String(
+      (await PipelineModel.create({ key: 'mismatch', name: 'mismatch', stages: [{ operationKey: 'brainstorm', overrides: { provider: 'gemini', model: 'claude-opus-5-5' } }] }))._id,
+    );
+    await expect(actions.create({ repoId, pipelineId, task: 'This should not start at all', when: 'now' })).rejects.toThrow(/belongs to provider "anthropic"/);
+  });
+
+  it('retry can switch a blocked stage to another model', async () => {
+    const pipelineId = await pipeline('switch', [['brainstorm', 'evil']]);
+    const run = await actions.create({ repoId, pipelineId, task: 'Switch models after a block', when: 'now' });
+    const id = String(run._id);
+    await waitFor(async () => (await load(id)).status === 'blocked');
+    await actions.retry(id, 'Use the offline agent', { provider: 'mock', model: 'mock-agent', scope: 'remaining' });
+    await waitFor(async () => (await load(id)).status === 'awaiting_approval');
+    const r = await load(id);
+    expect(r.stages[0].snapshot.provider).toBe('mock');
+    expect(r.stages[0].snapshot.model).toBe('mock-agent');
+    await expect(actions.retry(id, '', { provider: 'mock', model: 'x', scope: 'stage' })).rejects.toThrow(/Cannot retry/);
   });
 
   it('blocks the run when the run budget is exhausted', async () => {

@@ -96,6 +96,7 @@ export class AnthropicProvider implements AgentProvider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
+    if (!req.model?.trim()) throw new ProviderError('Anthropic: no model is configured for this stage. Choose a model for the operation or the pipeline stage.');
     const legacy = LEGACY.test(req.model);
     const params: BetaMessageStreamParams = {
       model: req.model,

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OperationSchema, PipelineSchema, SkillSchema } from '@harness/shared';
+import { DEFAULT_MODELS, modelProblem, OperationSchema, PipelineSchema, SkillSchema } from '@harness/shared';
 import { DEFAULT_OPERATIONS } from '../src/defaults/operations';
 import { DEFAULT_PIPELINES } from '../src/defaults/pipelines';
 import { DEFAULT_SKILLS } from '../src/defaults/skills';
@@ -24,6 +24,19 @@ describe('defaults', () => {
       if (o.gates.some((g) => g.onFail === 'rewind')) expect(keys.has(o.rewindTo!)).toBe(true);
       for (const a of o.artifacts) for (const p of a.requiredPatterns) expect(() => new RegExp(p.pattern, 'im')).not.toThrow();
     }
+  });
+});
+
+describe('provider/model pairing', () => {
+  it('flags blank models and models that belong to another provider', () => {
+    expect(OperationSchema.safeParse({ key: 'x-op', name: 'X', instructions: 'x', policy: {}, model: '' }).success).toBe(false);
+    expect(modelProblem('gemini', '', DEFAULT_MODELS)).toContain('No model');
+    expect(modelProblem('gemini', 'claude-opus-5-5', DEFAULT_MODELS)).toContain('belongs to provider "anthropic"');
+    expect(modelProblem('gemini', 'gemini-2.5-flash', DEFAULT_MODELS)).toBeNull();
+    // Ids the catalog does not know are allowed (custom or newly released models).
+    expect(modelProblem('gemini', 'gemini-9-ultra', DEFAULT_MODELS)).toBeNull();
+    // Blank stage overrides mean "no override".
+    expect(PipelineSchema.parse({ key: 'p-x', name: 'P', stages: [{ operationKey: 'plan', overrides: { provider: '', model: ' ' } }] }).stages[0].overrides).toEqual({});
   });
 });
 

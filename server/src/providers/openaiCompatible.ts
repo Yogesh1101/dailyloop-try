@@ -25,6 +25,26 @@ export interface CompatOptions {
   modelIdPrefix?: string;
 }
 
+/**
+ * Readable message + raw text from an SDK error. Gemini wraps errors in an array
+ * (`[{"error":{...}}]`), which the SDK cannot unpack, so it ends up as raw JSON in the message.
+ */
+export function apiErrorText(err: { message: string; error?: unknown }): { clean: string; raw: string } {
+  const raw = err.message.replace(/^\d{3}\s+/, '');
+  let clean = raw;
+  try {
+    const body = JSON.parse(raw);
+    const first = Array.isArray(body) ? body[0] : body;
+    const m = first?.error?.message ?? first?.message;
+    if (typeof m === 'string' && m) clean = m;
+  } catch {
+    /* not JSON */
+  }
+  const inner = err.error as { message?: unknown } | undefined;
+  if (inner && typeof inner.message === 'string' && inner.message) clean = inner.message;
+  return { clean, raw: inner ? `${raw} ${JSON.stringify(inner)}` : raw };
+}
+
 /** Remove JSON Schema keywords recursively. */
 export function stripKeywords(schema: Record<string, unknown>, keywords: string[]): Record<string, unknown> {
   const walk = (v: unknown): unknown => {
@@ -120,15 +140,18 @@ export class OpenAICompatibleProvider implements AgentProvider {
   private toProviderError(err: unknown): ProviderError {
     if (err instanceof OpenAI.APIError) {
       const status = err.status;
-      const msg = `${this.label} ${status ?? ''}: ${err.message}`.trim();
+      const { clean, raw } = apiErrorText(err);
+      const msg = `${this.label} ${status ?? ''}: ${clean}`.trim();
       if (status === 429) {
-        const wait = retryAfterMs(err.headers, err.message);
-        return new ProviderError(msg, classify429(err.message, wait, (err as { code?: string }).code ?? undefined), wait);
+        const wait = retryAfterMs(err.headers, raw);
+        return new ProviderError(msg, classify429(raw, wait, (err as { code?: string }).code ?? undefined), wait);
       }
-      if (status === 401 || status === 403) return new ProviderError(`${this.label} authentication failed: ${this.configHint}`);
-      if (status === 400 || status === 404 || status === 422) return new ProviderError(`${this.label} rejected the request (${status}): ${err.message}`);
+      if (status === 401 || status === 403 || (status === 400 && /api key/i.test(clean))) {
+        return new ProviderError(`${this.label} authentication failed (${clean}). ${this.configHint}`);
+      }
+      if (status === 400 || status === 404 || status === 422) return new ProviderError(`${this.label} rejected the request (${status}): ${clean}`);
       if (status === undefined || status === 408 || status === 409 || status >= 500) {
-        return new ProviderError(msg, 'transient', retryAfterMs(err.headers, err.message));
+        return new ProviderError(msg, 'transient', retryAfterMs(err.headers, raw));
       }
       return new ProviderError(msg);
     }
@@ -136,6 +159,7 @@ export class OpenAICompatibleProvider implements AgentProvider {
   }
 
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
+    if (!req.model?.trim()) throw new ProviderError(`${this.label}: no model is configured for this stage. Choose a model for the operation or the pipeline stage.`);
     const effort = this.opts.reasoningEffort && !this.noEffort.has(req.model) ? this.opts.reasoningEffort(req.effort) : undefined;
     const body = (withEffort: boolean): OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming => ({
       model: req.model,

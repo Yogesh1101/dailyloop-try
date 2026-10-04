@@ -3,6 +3,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import {
   KnowledgeEntrySchema,
+  modelProblem,
   OperationSchema,
   PipelineSchema,
   RepoSchema,
@@ -20,6 +21,7 @@ import {
 } from '../db/models';
 import { builtInDefault } from '../db/seed';
 import { clonePathFor, git, repoRoot, syncRepo, validateLocalRepo, type RepoRef } from '../engine/workspace';
+import { getSettings } from '../engine/settings';
 import { Scheduler } from '../scheduler';
 import { HttpError } from '../util/misc';
 import type { AppContext } from './context';
@@ -164,6 +166,8 @@ export function configRoutes(ctx: AppContext): Router {
     const missing = op.skills.filter((s) => !skills.some((k) => k.slug === s));
     if (missing.length) throw new HttpError(400, `Unknown skill(s): ${missing.join(', ')}`);
     if (!ctx.providers.list().some((p) => p.id === op.provider)) throw new HttpError(400, `Unknown provider "${op.provider}"`);
+    const problem = modelProblem(op.provider, op.model, (await getSettings()).models);
+    if (problem) throw new HttpError(400, problem);
     const ids = new Set<string>();
     for (const g of op.gates) {
       if (ids.has(g.id)) throw new HttpError(400, `Duplicate gate id "${g.id}"`);
@@ -246,9 +250,17 @@ export function configRoutes(ctx: AppContext): Router {
   const validatePipeline = async (body: unknown, builtIn: boolean) => {
     const p = PipelineSchema.parse({ ...(body as object), builtIn });
     const keys = p.stages.map((s) => s.operationKey);
-    const ops = await OperationModel.find({ key: { $in: keys } }, { key: 1 }).lean();
+    const ops = await OperationModel.find({ key: { $in: keys } }, { key: 1, name: 1, provider: 1, model: 1 }).lean();
     const missing = keys.filter((k) => !ops.some((o) => o.key === k));
     if (missing.length) throw new HttpError(400, `Unknown operation(s): ${[...new Set(missing)].join(', ')}`);
+    const catalog = (await getSettings()).models;
+    for (const st of p.stages) {
+      const op = ops.find((o) => o.key === st.operationKey)!;
+      const provider = st.overrides.provider ?? op.provider;
+      if (!ctx.providers.list().some((x) => x.id === provider)) throw new HttpError(400, `Stage "${op.name}": unknown provider "${provider}"`);
+      const problem = modelProblem(provider, st.overrides.model ?? op.model, catalog);
+      if (problem) throw new HttpError(400, `Stage "${op.name}": ${problem}`);
+    }
     if (new Set(keys).size !== keys.length) throw new HttpError(400, 'An operation may appear only once per pipeline');
     for (const re of p.globalPolicy.commandDenylist) {
       try {

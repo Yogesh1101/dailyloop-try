@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { GateResult, HumanApprovalGate, RunEvent, RunStage } from '@harness/shared';
+import { modelProblem, type GateResult, type HumanApprovalGate, type RunEvent, type RunStage } from '@harness/shared';
 import { ago, api, compact, usd, type Run } from '../api';
 import { useRunStream } from '../hooks';
 import { Card, Check, Empty, Field, JsonView, Markdown, Modal, PageHead, Seg, Select, StatusPill, Tabs, TextArea, useToast } from '../components/ui';
@@ -213,12 +213,20 @@ function ApprovalPanel({ run, gate }: { run: Run; gate?: HumanApprovalGate }) {
 function BlockedPanel({ run }: { run: Run }) {
   const toast = useToast();
   const qc = useQueryClient();
-  const [guidance, setGuidance] = useState('');
+  const providers = useQuery({ queryKey: ['providers'], queryFn: api.providers });
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings });
   const stage = run.stages[run.currentStage];
+  const [guidance, setGuidance] = useState('');
+  const [switching, setSwitching] = useState(/model|quota|provider/i.test(stage?.error ?? ''));
+  const [provider, setProvider] = useState(stage?.snapshot.provider ?? '');
+  const [model, setModel] = useState(stage?.snapshot.model ?? '');
+  const [scope, setScope] = useState<'stage' | 'remaining'>('remaining');
+  const catalog = settings.data?.models ?? [];
+  const problem = switching && settings.data ? modelProblem(provider, model, catalog) : null;
   const retry = useMutation({
-    mutationFn: () => api.post(`/runs/${run._id}/retry`, { feedback: guidance }),
+    mutationFn: () => api.post(`/runs/${run._id}/retry`, { feedback: guidance, ...(switching ? { provider, model, scope } : {}) }),
     onSuccess: () => {
-      toast('Retry queued');
+      toast(switching ? `Retry queued on ${provider}/${model}` : 'Retry queued');
       setGuidance('');
       void qc.invalidateQueries({ queryKey: ['run', run._id] });
     },
@@ -240,8 +248,41 @@ function BlockedPanel({ run }: { run: Run }) {
         <Field label="Guidance for the retry (optional)" hint="Fix the cause first (repo checks, budgets, provider keys, operation config), then retry the current stage.">
           <TextArea rows={2} value={guidance} onChange={setGuidance} />
         </Field>
+        <div className="stack sm">
+          <Check
+            checked={switching}
+            onChange={setSwitching}
+            label={
+              <span>
+                Switch model before retrying <span className="muted small">(currently <code>{stage?.snapshot.provider}/{stage?.snapshot.model || '(none)'}</code>)</span>
+              </span>
+            }
+          />
+          {switching && (
+            <div className="grid cols-3" style={{ gap: 8 }}>
+              <Select
+                value={provider}
+                onChange={(v) => {
+                  setProvider(v);
+                  setModel(catalog.find((m) => m.provider === v)?.id ?? '');
+                }}
+                options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))}
+              />
+              <div>
+                <input className="input code" list="retry-models" placeholder="Model id" value={model} onChange={(e) => setModel(e.target.value)} />
+                <datalist id="retry-models">
+                  {catalog.filter((m) => m.provider === provider).map((m) => (
+                    <option key={m.id} value={m.id}>{m.label}</option>
+                  ))}
+                </datalist>
+              </div>
+              <Seg options={[{ id: 'remaining', label: 'This and later stages' }, { id: 'stage', label: 'This stage only' }]} value={scope} onChange={setScope} />
+            </div>
+          )}
+          {problem && <span className="small">{problem}</span>}
+        </div>
         <div className="row end">
-          <button className="btn primary" disabled={retry.isPending} onClick={() => retry.mutate()}>
+          <button className="btn primary" disabled={retry.isPending || !!problem} onClick={() => retry.mutate()}>
             Retry {stage?.name}
           </button>
         </div>

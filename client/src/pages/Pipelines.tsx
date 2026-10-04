@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { EFFORTS, type Pipeline } from '@harness/shared';
+import { EFFORTS, modelProblem, type Pipeline } from '@harness/shared';
 import { api, editable, type PipelineDoc } from '../api';
 import { Card, Check, Field, ListEditor, NumberInput, PageHead, Select, TextArea, TextInput, useToast } from '../components/ui';
 import { gateBadges } from './Operations';
@@ -80,6 +80,7 @@ export function PipelineEdit() {
 
   if (!draft) return <p className="muted">Loading…</p>;
   const set = <K extends keyof Pipeline>(k: K, v: Pipeline[K]) => setDraft({ ...draft, [k]: v });
+  const firstModel = (provider: string) => (settings.data?.models ?? []).find((m) => m.provider === provider)?.id;
   const move = (i: number, d: number) => {
     const next = [...draft.stages];
     const [s] = next.splice(i, 1);
@@ -111,7 +112,7 @@ export function PipelineEdit() {
               <div className="editor-block stack sm">
                 <span className="label">Use one provider and model for every stage</span>
                 <div className="grid cols-2" style={{ gap: 8 }}>
-                  <Select value={bulk.provider} onChange={(v) => setBulk({ provider: v, model: '' })} placeholder="Provider…" options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))} />
+                  <Select value={bulk.provider} onChange={(v) => setBulk({ provider: v, model: firstModel(v) ?? '' })} placeholder="Provider…" options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))} />
                   <div>
                     <input className="input code" list="bulk-models" placeholder="Model id" value={bulk.model} onChange={(e) => setBulk({ ...bulk, model: e.target.value })} />
                     <datalist id="bulk-models">
@@ -154,11 +155,23 @@ export function PipelineEdit() {
                       </div>
                     </div>
                     {op && <div className="row">{gateBadges(op)}</div>}
+                    {op && settings.data && modelProblem(o.provider ?? op.provider, o.model ?? op.model, settings.data.models) && (
+                      <div className="callout warning small">{modelProblem(o.provider ?? op.provider, o.model ?? op.model, settings.data.models)}</div>
+                    )}
                     <details>
                       <summary className="small muted" style={{ cursor: 'pointer' }}>Overrides for this pipeline{o.provider || o.model || o.effort || o.extraInstructions ? ' (set)' : ''}</summary>
                       <div className="stack sm" style={{ marginTop: 8 }}>
                         <div className="grid cols-3">
-                          <Field label="Provider"><Select value={o.provider ?? ''} onChange={(v) => setO('provider', v)} placeholder={`(${op?.provider ?? 'default'})`} options={(providers.data ?? []).map((p) => ({ value: p.id, label: p.label }))} /></Field>
+                          <Field label="Provider">
+                            <Select
+                              value={o.provider ?? ''}
+                              onChange={(v) =>
+                                set('stages', draft.stages.map((x, j) => (j === i ? { ...x, overrides: { ...x.overrides, provider: v || undefined, model: v ? (firstModel(v) ?? x.overrides?.model) : undefined } } : x)))
+                              }
+                              placeholder={`(${op?.provider ?? 'default'})`}
+                              options={(providers.data ?? []).map((p) => ({ value: p.id, label: p.label }))}
+                            />
+                          </Field>
                           <Field label="Model"><TextInput mono value={o.model} onChange={(v) => setO('model', v)} placeholder={op?.model} /></Field>
                           <Field label="Effort"><Select value={o.effort ?? ''} onChange={(v) => setO('effort', v)} placeholder={`(${op?.effort ?? 'default'})`} options={EFFORTS.map((e) => ({ value: e, label: e }))} /></Field>
                         </div>

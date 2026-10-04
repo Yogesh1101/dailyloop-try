@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { EFFORTS, TOOL_NAMES, type ArtifactContract, type Gate, type Operation, type Policy } from '@harness/shared';
+import { EFFORTS, modelProblem, TOOL_NAMES, type ArtifactContract, type Gate, type Operation, type Policy } from '@harness/shared';
 import { api, editable, type OperationDoc } from '../api';
 import { Card, Check, Empty, Field, ListEditor, Markdown, Modal, NumberInput, PageHead, Seg, Select, Tabs, TextArea, TextInput, useToast } from '../components/ui';
 
@@ -352,13 +352,24 @@ export function OperationEdit() {
               <div className="stack">
                 <div className="grid cols-2">
                   <Field label="Provider">
-                    <Select value={draft.provider} onChange={(v) => set('provider', v)} options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))} />
+                    <Select
+                      value={draft.provider}
+                      onChange={(v) => {
+                        // Keep the model only if it belongs to the new provider; otherwise pick its first catalog model.
+                        const ids = (settings.data?.models ?? []).filter((m) => m.provider === v).map((m) => m.id);
+                        setDraft({ ...draft, provider: v, model: ids.includes(draft.model) ? draft.model : (ids[0] ?? '') });
+                      }}
+                      options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))}
+                    />
                   </Field>
                   <Field label="Model" hint="From the model catalog in Settings, or type any id.">
                     <input className="input code" list="models" value={draft.model} onChange={(e) => set('model', e.target.value)} />
                     <datalist id="models">{models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}</datalist>
                   </Field>
                 </div>
+                {settings.data && modelProblem(draft.provider, draft.model, settings.data.models) && (
+                  <div className="callout warning small">{modelProblem(draft.provider, draft.model, settings.data.models)}</div>
+                )}
                 <Field label="Effort" hint="Reasoning depth for providers that support it. Higher costs more and is better for hard work.">
                   <Seg options={EFFORTS.map((e) => ({ id: e, label: e }))} value={draft.effort} onChange={(v) => set('effort', v)} />
                 </Field>
