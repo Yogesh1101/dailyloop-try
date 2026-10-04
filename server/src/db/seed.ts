@@ -1,9 +1,9 @@
-import { OperationSchema, PipelineSchema, SkillSchema } from '@harness/shared';
+import { DEFAULT_MODELS, OperationSchema, PipelineSchema, SkillSchema } from '@harness/shared';
 import { DEFAULT_OPERATIONS } from '../defaults/operations';
 import { DEFAULT_PIPELINES } from '../defaults/pipelines';
 import { DEFAULT_SKILLS } from '../defaults/skills';
 import { getSettings } from '../engine/settings';
-import { OperationModel, PipelineModel, SkillModel } from './models';
+import { OperationModel, PipelineModel, SettingsModel, SkillModel } from './models';
 
 /** Insert built-in skills, operations and pipelines that do not exist yet. User edits are never overwritten. */
 export async function seedDefaults(): Promise<{ skills: number; operations: number; pipelines: number }> {
@@ -28,7 +28,12 @@ export async function seedDefaults(): Promise<{ skills: number; operations: numb
       pipelines++;
     }
   }
-  await getSettings();
+  // New providers ship catalog entries; add them for providers the catalog has never had,
+  // without resurrecting models the user deliberately removed.
+  const settings = await getSettings();
+  const known = new Set(settings.models.map((m) => m.provider));
+  const added = DEFAULT_MODELS.filter((m) => !known.has(m.provider));
+  if (added.length) await SettingsModel.updateOne({ key: 'global' }, { $set: { models: [...settings.models, ...added] } });
   return { skills, operations, pipelines };
 }
 

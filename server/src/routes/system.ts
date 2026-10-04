@@ -29,6 +29,23 @@ export function systemRoutes(ctx: AppContext): Router {
     res.json(ctx.providers.list().map((p) => ({ id: p.id, label: p.label, configured: p.isConfigured(), configHint: p.configHint })));
   });
 
+  /** Model ids the configured key can use, for "Import models" in Settings. */
+  r.get('/providers/:id/models', async (req, res) => {
+    let provider;
+    try {
+      provider = ctx.providers.get(String(req.params.id));
+    } catch {
+      throw new HttpError(404, 'Unknown provider');
+    }
+    if (!provider.listModels) throw new HttpError(400, `${provider.label} cannot list models`);
+    if (!provider.isConfigured()) throw new HttpError(400, `${provider.label} is not configured. ${provider.configHint}`);
+    try {
+      res.json({ provider: provider.id, models: await provider.listModels() });
+    } catch (e) {
+      throw new HttpError(502, (e as Error).message);
+    }
+  });
+
   r.get('/settings', async (_req, res) => res.json(await getSettings()));
   r.put('/settings', async (req, res) => res.json(await updateSettings(req.body)));
 

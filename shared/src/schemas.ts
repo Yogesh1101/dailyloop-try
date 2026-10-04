@@ -324,6 +324,10 @@ export const ModelInfoSchema = z.object({
   outputPerMTok: z.number().min(0),
   cacheReadPerMTok: z.number().min(0).default(0),
   cacheWritePerMTok: z.number().min(0).default(0),
+  /** Client-side pacing: requests per minute (free tiers are often 5-15). Empty = no pacing. */
+  rpmLimit: z.number().int().min(1).optional(),
+  /** Client-side pacing: tokens per minute, input + output. Empty = no pacing. */
+  tpmLimit: z.number().int().min(1).optional(),
 });
 export type ModelInfo = z.infer<typeof ModelInfoSchema>;
 

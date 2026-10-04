@@ -1,4 +1,5 @@
 import { AnthropicProvider } from './anthropic';
+import { GeminiProvider } from './gemini';
 import { MockProvider } from './mock';
 import { OpenAIProvider } from './openai';
 import type { AgentProvider } from './types';
@@ -11,7 +12,7 @@ import type { AgentProvider } from './types';
 export class ProviderRegistry {
   private providers = new Map<string, AgentProvider>();
 
-  constructor(list: AgentProvider[] = [new AnthropicProvider(), new OpenAIProvider(), new MockProvider()]) {
+  constructor(list: AgentProvider[] = [new AnthropicProvider(), new GeminiProvider(), new OpenAIProvider(), new MockProvider()]) {
     for (const p of list) this.register(p);
   }
 

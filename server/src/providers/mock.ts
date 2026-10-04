@@ -16,6 +16,10 @@ export class MockProvider implements AgentProvider {
     return true;
   }
 
+  async listModels(): Promise<string[]> {
+    return ['mock-agent'];
+  }
+
   async complete(req: CompletionRequest): Promise<CompletionResponse> {
     const tools = new Set(req.tools.map((t) => t.name));
     const lastAssistant = [...req.messages].reverse().find((m) => m.role === 'assistant') as

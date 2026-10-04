@@ -44,7 +44,9 @@ export const ARTIFACTS_DIR_TOKEN = '{{artifactsDir}}';
 /**
  * Seed model catalog (USD per million tokens). Editable in Settings.
  * Anthropic prices are first-party API list prices. OpenAI entries are examples:
- * verify current pricing before relying on cost gates for them.
+ * verify current pricing before relying on cost gates for them. Gemini entries are priced
+ * at $0 for the free tier, with conservative free-tier pacing limits; "Import models" in
+ * Settings lists the ids your key can actually use.
  */
 export const DEFAULT_MODELS: ModelInfo[] = [
   {
@@ -82,6 +84,28 @@ export const DEFAULT_MODELS: ModelInfo[] = [
     outputPerMTok: 50,
     cacheReadPerMTok: 0.25,
     cacheWritePerMTok: 12.5,
+  },
+  {
+    provider: 'gemini',
+    id: 'gemini-2.5-flash',
+    label: 'Gemini 2.5 Flash (free tier; verify id and limits)',
+    inputPerMTok: 0,
+    outputPerMTok: 0,
+    cacheReadPerMTok: 0,
+    cacheWritePerMTok: 0,
+    rpmLimit: 10,
+    tpmLimit: 250_000,
+  },
+  {
+    provider: 'gemini',
+    id: 'gemini-2.5-flash-lite',
+    label: 'Gemini 2.5 Flash-Lite (free tier; verify id and limits)',
+    inputPerMTok: 0,
+    outputPerMTok: 0,
+    cacheReadPerMTok: 0,
+    cacheWritePerMTok: 0,
+    rpmLimit: 15,
+    tpmLimit: 250_000,
   },
   {
     provider: 'openai',

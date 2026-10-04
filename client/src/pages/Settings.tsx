@@ -13,6 +13,18 @@ export function SettingsPage() {
   useEffect(() => {
     if (settings.data) setD(settings.data);
   }, [settings.data]);
+  const importModels = useMutation({
+    mutationFn: (provider: string) => api.get<{ provider: string; models: string[] }>(`/providers/${provider}/models`),
+    onSuccess: ({ provider, models }) => {
+      if (!d) return;
+      const have = new Set(d.models.filter((m) => m.provider === provider).map((m) => m.id));
+      const fresh = models.filter((id) => !have.has(id));
+      if (!fresh.length) return toast(`No new models from ${provider} (${models.length} available, all in the catalog)`);
+      setD({ ...d, models: [...d.models, ...fresh.map((id) => ({ provider, id, label: id, inputPerMTok: 0, outputPerMTok: 0, cacheReadPerMTok: 0, cacheWritePerMTok: 0 }))] });
+      toast(`Added ${fresh.length} model(s) from ${provider} — set prices and limits, then save`);
+    },
+    onError: (e: Error) => toast(e.message, 'error'),
+  });
   const save = useMutation({
     mutationFn: () => api.put('/settings', d),
     onSuccess: () => (toast('Settings saved'), qc.invalidateQueries({ queryKey: ['settings'] })),
@@ -33,7 +45,14 @@ export function SettingsPage() {
                   <strong>{p.label}</strong> <code>{p.id}</code>
                   <div className="tiny muted">{p.configHint}</div>
                 </div>
-                {p.configured ? <span className="pill good">✓ Configured</span> : <span className="pill serious">■ Not configured</span>}
+                <div className="row">
+                  {p.configured && p.id !== 'mock' && (
+                    <button className="btn sm" disabled={importModels.isPending} onClick={() => importModels.mutate(p.id)} title="Add the model ids this key can use to the catalog">
+                      Import models
+                    </button>
+                  )}
+                  {p.configured ? <span className="pill good">✓ Configured</span> : <span className="pill serious">■ Not configured</span>}
+                </div>
               </div>
             ))}
           </div>
@@ -48,7 +67,11 @@ export function SettingsPage() {
           </div>
         </Card>
       </div>
-      <Card title="Model catalog" sub="Prices in USD per million tokens drive cost tracking and budget gates. Verify prices for non-Anthropic models." pad={false}>
+      <Card
+        title="Model catalog"
+        sub="Prices (USD per million tokens) drive cost tracking and budget gates. Req/min and tokens/min pace requests to stay under provider rate limits — set them to your tier's limits (free tiers are low). Leave empty for no pacing."
+        pad={false}
+      >
         <table className="table">
           <thead>
             <tr>
@@ -59,6 +82,8 @@ export function SettingsPage() {
               <th className="num">Output</th>
               <th className="num">Cache read</th>
               <th className="num">Cache write</th>
+              <th className="num">Req/min</th>
+              <th className="num">Tokens/min</th>
               <th />
             </tr>
           </thead>
@@ -69,7 +94,12 @@ export function SettingsPage() {
                 <td><input className="input code" value={m.id} onChange={(e) => setModel(i, { id: e.target.value })} /></td>
                 <td><input className="input" value={m.label} onChange={(e) => setModel(i, { label: e.target.value })} /></td>
                 {(['inputPerMTok', 'outputPerMTok', 'cacheReadPerMTok', 'cacheWritePerMTok'] as const).map((k) => (
-                  <td key={k} style={{ width: 100 }}><input className="input" type="number" step="0.01" min={0} value={m[k]} onChange={(e) => setModel(i, { [k]: Number(e.target.value) })} /></td>
+                  <td key={k} style={{ width: 96 }}><input className="input" type="number" step="0.01" min={0} value={m[k]} onChange={(e) => setModel(i, { [k]: Number(e.target.value) })} /></td>
+                ))}
+                {(['rpmLimit', 'tpmLimit'] as const).map((k) => (
+                  <td key={k} style={{ width: k === 'tpmLimit' ? 132 : 92 }}>
+                    <input className="input" type="number" min={1} step={k === 'tpmLimit' ? 1000 : 1} placeholder="—" value={m[k] ?? ''} onChange={(e) => setModel(i, { [k]: e.target.value === '' ? undefined : Number(e.target.value) })} />
+                  </td>
                 ))}
                 <td><button className="btn ghost sm danger" onClick={() => setD({ ...d, models: d.models.filter((_, j) => j !== i) })}>Remove</button></td>
               </tr>

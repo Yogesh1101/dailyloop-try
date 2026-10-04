@@ -152,10 +152,30 @@ Export-mode enforcement is best-effort compared to in-harness runs: Claude Code'
 | Provider | Setup |
 |---|---|
 | `anthropic` | `ANTHROPIC_API_KEY`. Default model `claude-opus-5-5`; adaptive thinking with per-operation effort, streaming, prompt caching, server-side refusal fallback. |
+| `gemini` | `GEMINI_API_KEY` — a **free** Google AI Studio key works (Flash / Flash-Lite models). Uses Gemini's OpenAI-compatible endpoint; effort maps to `reasoning_effort`. |
 | `openai` | `OPENAI_API_KEY`; set `OPENAI_BASE_URL` for any OpenAI-compatible server (Ollama, vLLM, LM Studio, gateways). |
 | `mock` | Always available, offline. |
 
-**Add a provider:** implement `AgentProvider` (`server/src/providers/types.ts`). It needs one `complete()` call per turn that returns text, tool calls, stop reason and usage. Register it in `providers/registry.ts`. Tools, policies and gates work unchanged.
+**Add a provider:** implement `AgentProvider` (`server/src/providers/types.ts`). It needs one `complete()` call per turn that returns text, tool calls, stop reason and usage. Register it in `providers/registry.ts`. Tools, policies and gates work unchanged. For an OpenAI-compatible endpoint, extend `OpenAICompatibleProvider`, as `gemini.ts` does.
+
+### Running on Gemini's free tier
+
+1. Create a key in Google AI Studio and set `GEMINI_API_KEY` in `.env`.
+2. **Settings → Providers → Google Gemini → Import models** to see the model ids your key can use. Check the req/min and tokens/min limits for your tier.
+3. Open a pipeline and use **Use one provider and model for every stage**, e.g. `gemini` / `gemini-2.5-flash`. Save.
+
+Free tiers have low limits — expect a few full runs per day. Free-tier prompts and outputs may be used by Google to improve its products and may be read by human reviewers, so **use it only on test or personal repositories**, never proprietary code (outside the EEA, UK and Switzerland).
+
+### Rate limits
+
+The harness owns the retry policy for every provider, and every pause is logged on the run:
+
+- **Pacing.** Requests are spaced under each model's **req/min** and **tokens/min** from the catalog, shared across runs on the same model.
+- **429 rate limit.** The run pauses for as long as the provider asks (`Retry-After`, or Gemini's `retryDelay`), then continues. Other runs on the same model pause too. If it is still being throttled after 20 minutes in one turn, the stage fails with advice.
+- **Quota exhausted.** A daily quota, or a billing quota, blocks the stage with a clear message instead of waiting for hours. Retry it after the reset.
+- **Transient errors.** 5xx, overload and network errors are retried 3 times with backoff.
+
+Waiting counts against the stage timeout. Raise `timeoutMinutes` on the operations if free-tier pacing makes stages slow.
 
 Model prices live in **Settings → Model catalog** and drive cost tracking and budget gates. Verify prices for non-Anthropic models.
 
@@ -202,4 +222,5 @@ E2E_MONGODB_URI=mongodb://127.0.0.1:27017 npm test # + end-to-end runs: violatio
 
 - **Knowledge retrieval is keyword-based** (title > tags > body), not embeddings or a true graph.
 - **Pull requests are GitHub-only**; push works with any git remote.
+- **Gemini model ids and free-tier limits change often.** The catalog seeds `gemini-2.5-flash` and `gemini-2.5-flash-lite` with conservative limits; use **Import models** and adjust the limits to your tier.
 - **One process.** The queue and scheduler are in-process; run one server per database.

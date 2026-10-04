@@ -64,6 +64,8 @@ export function PipelineEdit() {
   const providers = useQuery({ queryKey: ['providers'], queryFn: api.providers });
   const [draft, setDraft] = useState<Pipeline | null>(null);
   const [adding, setAdding] = useState('');
+  const [bulk, setBulk] = useState({ provider: '', model: '' });
+  const settings = useQuery({ queryKey: ['settings'], queryFn: api.settings });
   useEffect(() => {
     if (doc.data) setDraft(editable(doc.data) as Pipeline);
   }, [doc.data]);
@@ -106,6 +108,33 @@ export function PipelineEdit() {
         <div className="stack">
           <Card title="Stages" sub="Operations run in this order. Each stage's gates must pass before the next begins.">
             <div className="stack">
+              <div className="editor-block stack sm">
+                <span className="label">Use one provider and model for every stage</span>
+                <div className="grid cols-2" style={{ gap: 8 }}>
+                  <Select value={bulk.provider} onChange={(v) => setBulk({ provider: v, model: '' })} placeholder="Provider…" options={(providers.data ?? []).map((p) => ({ value: p.id, label: `${p.label}${p.configured ? '' : ' (not configured)'}` }))} />
+                  <div>
+                    <input className="input code" list="bulk-models" placeholder="Model id" value={bulk.model} onChange={(e) => setBulk({ ...bulk, model: e.target.value })} />
+                    <datalist id="bulk-models">
+                      {(settings.data?.models ?? []).filter((m) => m.provider === bulk.provider).map((m) => (
+                        <option key={m.id} value={m.id}>{m.label}</option>
+                      ))}
+                    </datalist>
+                  </div>
+                </div>
+                <div className="row end">
+                  <button className="btn ghost" onClick={() => set('stages', draft.stages.map((x) => ({ ...x, overrides: { ...x.overrides, provider: undefined, model: undefined } })))}>
+                    Clear overrides
+                  </button>
+                  <button
+                    className="btn"
+                    disabled={!bulk.provider || !bulk.model.trim()}
+                    onClick={() => set('stages', draft.stages.map((x) => ({ ...x, overrides: { ...x.overrides, provider: bulk.provider, model: bulk.model.trim() } })))}
+                  >
+                    Apply to all stages
+                  </button>
+                </div>
+                <span className="hint small muted">Sets each stage's override; the operations keep their own defaults. Save to keep it.</span>
+              </div>
               {draft.stages.map((s, i) => {
                 const op = ops.data?.find((o) => o.key === s.operationKey);
                 const o = s.overrides ?? {};

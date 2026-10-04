@@ -1,6 +1,7 @@
 import type { Effort, ModelInfo, Usage } from '@harness/shared';
 import type { AgentProvider, CompletionRequest, ConversationItem, ToolResult, ToolSpec, TokenUsage } from '../providers/types';
 import { ProviderError } from '../providers/types';
+import { abortableSleep, RateLimiter, RateLimitWaitExceeded, sharedLimiter } from './rateLimiter';
 import type { ToolExecutor } from './tools';
 
 export class BudgetExceededError extends Error {
@@ -40,6 +41,8 @@ export interface SessionHooks {
   onToolResult(name: string, result: ToolResult): void;
   /** Called after every model turn; may throw BudgetExceededError for run-level or monthly budgets. */
   onUsage(delta: Usage, model: string): Promise<void>;
+  /** The session is pausing (pacing, provider rate limit, transient error) before the next request. */
+  onWait?(ms: number, reason: string): void;
 }
 
 export interface SessionOptions {
@@ -54,9 +57,18 @@ export interface SessionOptions {
   hooks: SessionHooks;
   signal: AbortSignal;
   meta?: CompletionRequest['meta'];
+  /** Shared request pacing. Defaults to the process-wide limiter. */
+  limiter?: RateLimiter;
+  /** Injectable for tests. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const MAX_NUDGES = 3;
+/** Longest the session keeps waiting on rate limits for a single turn before giving up. */
+export const MAX_RATE_WAIT_PER_TURN_MS = 20 * 60_000;
+const MAX_TRANSIENT_RETRIES = 3;
+
+const fmtWait = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${Math.ceil(ms / 1000)}s`);
 
 /**
  * One agent conversation for one stage. Append-only transcript; gate feedback is
@@ -81,36 +93,14 @@ export class AgentSession {
 
   /** Run turns until the agent calls `finish`. Throws on policy violation, budget breach or agent failure. */
   async runUntilFinish(): Promise<{ summary: string }> {
-    const { provider, limits, hooks, signal } = this.opts;
+    const { hooks, signal } = this.opts;
     let nudges = 0;
     for (;;) {
       if (signal.aborted) throw new DOMException('Run cancelled', 'AbortError');
       this.checkBudgets();
       this.turns += 1;
 
-      let resp;
-      for (let attempt = 0; ; attempt++) {
-        try {
-          resp = await provider.complete({
-            model: this.opts.model,
-            system: this.opts.system,
-            messages: this.messages,
-            tools: this.opts.tools,
-            effort: this.opts.effort,
-            signal,
-            meta: this.opts.meta,
-          });
-          break;
-        } catch (e) {
-          if (signal.aborted) throw new DOMException('Run cancelled', 'AbortError');
-          if (e instanceof ProviderError && e.retryable && attempt < 2) {
-            await new Promise((r) => setTimeout(r, 2000 * 2 ** attempt));
-            continue;
-          }
-          throw new AgentFailedError(e instanceof Error ? e.message : String(e));
-        }
-      }
-
+      const resp = await this.completeWithRetries();
       const delta: Usage = { ...resp.usage, costUsd: costOf(resp.usage, this.opts.pricing(resp.model) ?? this.opts.pricing(this.opts.model)) };
       for (const k of Object.keys(delta) as (keyof Usage)[]) this.usage[k] += delta[k];
       await hooks.onUsage(delta, resp.model);
@@ -165,6 +155,104 @@ export class AgentSession {
       }
       this.messages.push({ role: 'tool', results });
       if (finished) return finished;
+    }
+  }
+
+  /** Rough token count of the next request, for tokens-per-minute pacing. */
+  private estimateTokens(): number {
+    return Math.ceil((this.opts.system.length + JSON.stringify(this.messages).length + JSON.stringify(this.opts.tools).length) / 4);
+  }
+
+  /**
+   * One model request with the harness retry policy:
+   * - pace requests under the model's rpm/tpm limits (shared across runs);
+   * - on a provider rate limit, wait as long as it asks (or back off) and retry;
+   * - retry transient failures a few times with backoff;
+   * - an exhausted quota or a fatal error ends the stage.
+   */
+  private async completeWithRetries() {
+    const { provider, limits, hooks, signal } = this.opts;
+    const limiter = this.opts.limiter ?? sharedLimiter;
+    const sleep = this.opts.sleep ?? abortableSleep;
+    const info = this.opts.pricing(this.opts.model);
+    const pacing = { rpm: info?.rpmLimit, tpm: info?.tpmLimit };
+    const key = `${provider.id}:${this.opts.model}`;
+    let rateWaited = 0;
+    let transient = 0;
+    let rateHits = 0;
+
+    const pause = async (ms: number, reason: string) => {
+      if (Date.now() + ms >= limits.deadline) {
+        throw new BudgetExceededError('timeout', `Stage time limit would be exceeded while waiting (${reason}). Raise the operation timeout or retry later.`);
+      }
+      hooks.onWait?.(ms, reason);
+      await sleep(ms, signal);
+    };
+
+    for (;;) {
+      if (signal.aborted) throw new DOMException('Run cancelled', 'AbortError');
+      // Always consult the limiter: even unpaced models honour a 429 cool-down set by another run.
+      let commit: (n: number) => void;
+      try {
+        commit = await limiter.acquire(key, pacing, pacing.tpm ? this.estimateTokens() : 0, {
+          signal,
+          maxWaitMs: Math.max(0, limits.deadline - Date.now()),
+          onWait: (ms) =>
+            hooks.onWait?.(
+              ms,
+              pacing.rpm || pacing.tpm
+                ? `pacing ${provider.label} ${this.opts.model} under ${pacing.rpm ?? '∞'} req/min, ${pacing.tpm?.toLocaleString() ?? '∞'} tokens/min`
+                : `${provider.label} ${this.opts.model} is cooling down after a rate limit`,
+            ),
+        });
+      } catch (e) {
+        if (e instanceof RateLimitWaitExceeded) {
+          throw new BudgetExceededError('timeout', 'Stage time limit would be exceeded while waiting for the model rate limit.');
+        }
+        throw e;
+      }
+      try {
+        const resp = await provider.complete({
+          model: this.opts.model,
+          system: this.opts.system,
+          messages: this.messages,
+          tools: this.opts.tools,
+          effort: this.opts.effort,
+          signal,
+          meta: this.opts.meta,
+        });
+        const u = resp.usage;
+        commit(u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens);
+        return resp;
+      } catch (e) {
+        commit(0);
+        if (signal.aborted) throw new DOMException('Run cancelled', 'AbortError');
+        if (!(e instanceof ProviderError)) throw new AgentFailedError(e instanceof Error ? e.message : String(e));
+        if (e.kind === 'quota_exhausted') {
+          throw new BudgetExceededError(
+            'providerQuota',
+            `${provider.label} quota exhausted for ${this.opts.model}: ${e.message.slice(0, 400)}. Free-tier daily quotas reset once a day — retry the stage later, or switch the stage to another model.`,
+          );
+        }
+        if (e.kind === 'rate_limit') {
+          rateHits += 1;
+          const wait = Math.min(e.retryAfterMs ?? Math.min(60_000, 5_000 * 2 ** (rateHits - 1)), 10 * 60_000) + Math.floor(Math.random() * 1000);
+          if (rateWaited + wait > MAX_RATE_WAIT_PER_TURN_MS) {
+            throw new AgentFailedError(`${provider.label} kept rate-limiting for ${fmtWait(rateWaited)}. Lower the model's req/min in Settings, reduce concurrent runs, or retry later.`);
+          }
+          limiter.coolDown(key, wait);
+          await pause(wait, `${provider.label} rate limit (429), waiting ${fmtWait(wait)}`);
+          rateWaited += wait;
+          continue;
+        }
+        if (e.kind === 'transient' && transient < MAX_TRANSIENT_RETRIES) {
+          transient += 1;
+          const wait = e.retryAfterMs ?? 2_000 * 2 ** (transient - 1);
+          await pause(wait, `${provider.label} error, retry ${transient}/${MAX_TRANSIENT_RETRIES} in ${fmtWait(wait)}: ${e.message.slice(0, 160)}`);
+          continue;
+        }
+        throw new AgentFailedError(e.message);
+      }
     }
   }
 

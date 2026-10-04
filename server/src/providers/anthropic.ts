@@ -8,7 +8,7 @@ import type {
   StopReason,
   ToolCall,
 } from './types';
-import { ProviderError } from './types';
+import { classify429, ProviderError, retryAfterMs } from './types';
 
 type BetaMessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type BetaContentBlockParam = Anthropic.Beta.Messages.BetaContentBlockParam;
@@ -90,7 +90,8 @@ export class AnthropicProvider implements AgentProvider {
   }
 
   private getClient(): Anthropic {
-    this.client ??= new Anthropic();
+    // Retries are owned by the harness (one policy for every provider, visible in the run log).
+    this.client ??= new Anthropic({ maxRetries: 0 });
     return this.client;
   }
 
@@ -124,22 +125,24 @@ export class AnthropicProvider implements AgentProvider {
       } catch (err) {
         if (req.signal?.aborted) throw err;
         if (err instanceof Anthropic.RateLimitError) {
-          throw new ProviderError(`Anthropic rate limit: ${err.message}`, true);
+          const wait = retryAfterMs(err.headers, err.message);
+          throw new ProviderError(`Anthropic rate limit: ${err.message}`, classify429(err.message, wait), wait);
         }
-        if (err instanceof Anthropic.AuthenticationError) {
+        if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) {
           throw new ProviderError('Anthropic authentication failed: check ANTHROPIC_API_KEY');
         }
         if (err instanceof Anthropic.BadRequestError || err instanceof Anthropic.NotFoundError) {
           throw new ProviderError(`Anthropic rejected the request (${err.status}): ${err.message}`);
         }
         if (err instanceof Anthropic.APIError) {
-          throw new ProviderError(`Anthropic API error ${err.status ?? ''}: ${err.message}`, true);
+          // 5xx, 529 overloaded, connection errors and timeouts.
+          throw new ProviderError(`Anthropic API error ${err.status ?? ''}: ${err.message}`, 'transient', retryAfterMs(err.headers, err.message));
         }
         // Not an API error: an eagerly streamed tool input that could not be parsed. Re-issue the turn.
-        if (attempt === 2) throw new ProviderError(`Unparseable tool input from model: ${String(err)}`);
+        if (attempt === 2) throw new ProviderError(`Unparseable tool input from model: ${String(err)}`, 'transient');
       }
     }
-    if (!message) throw new ProviderError('No response from Anthropic');
+    if (!message) throw new ProviderError('No response from Anthropic', 'transient');
 
     const toolCalls: ToolCall[] = [];
     const text: string[] = [];
@@ -166,5 +169,11 @@ export class AnthropicProvider implements AgentProvider {
       model: message.model,
       raw: { provider: 'anthropic', data: message.content },
     };
+  }
+
+  async listModels(): Promise<string[]> {
+    const ids: string[] = [];
+    for await (const m of this.getClient().models.list()) ids.push(m.id);
+    return ids.sort();
   }
 }

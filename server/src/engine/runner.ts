@@ -296,6 +296,11 @@ export class PipelineRunner {
             const hint = i && typeof i === 'object' ? String(i.path ?? i.command ?? i.pattern ?? '') : '';
             void this.emit(run, index, 'tool_call', `${name}${hint ? ` ${hint}` : ''}`, { data: input });
           },
+          onWait: (ms, reason) => {
+            run.statusMessage = `${op.name}: waiting ${Math.ceil(ms / 1000)}s — ${reason}`;
+            void this.save(run);
+            void this.emit(run, index, 'system', `Waiting ${Math.ceil(ms / 1000)}s: ${reason}`, { level: 'warn' });
+          },
           onToolResult: (name, r) =>
             void this.emit(run, index, 'tool_result', `${name}: ${r.content.split('\n')[0].slice(0, 200)}`, {
               level: r.isError ? 'warn' : 'info',
@@ -304,6 +309,7 @@ export class PipelineRunner {
           onUsage: async (delta, model) => {
             addUsage(stage.usage, delta);
             addUsage(run.usage, delta);
+            run.statusMessage = `Running ${op.name}`;
             monthSpent += delta.costUsd;
             await UsageRecordModel.create({
               runId,
